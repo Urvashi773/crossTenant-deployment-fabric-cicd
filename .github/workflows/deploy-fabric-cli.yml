@@ -1,0 +1,172 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# deploy-fabric-cli.yml
+# GitHub Actions — Fabric CI/CD (fab CLI Approach)
+#
+# Approach: Uses the official Microsoft Fabric CLI (`fab`) to deploy item
+#           schemas cross-tenant via SPN auth. The `fab` CLI internally
+#           calls the Fabric REST APIs.
+#
+# No data backup/restore — schema/metadata only.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   TARGET_TENANT_ID       — Azure AD tenant of the target Fabric workspace
+#   TARGET_CLIENT_ID       — SPN client ID with Workspace Admin on target
+#   TARGET_CLIENT_SECRET   — SPN client secret
+#   TARGET_WORKSPACE_ID    — GUID of the target Fabric workspace
+#
+# fab CLI docs: https://aka.ms/fabric-cli
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "🚀 Deploy Fabric Schema (fab CLI)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "PROD"
+        type: choice
+        options:
+          - PROD
+          - UAT
+          - DEV
+      item_names:
+        description: "Items to deploy (comma-separated, or 'all')"
+        required: true
+        default: "devsecops_lakehouse"
+
+jobs:
+  deploy:
+    name: "🚀 fab deploy: ${{ github.event.inputs.item_names }}"
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install fab CLI
+        run: |
+          echo "Installing Microsoft Fabric CLI..."
+          pip install fabric-cli
+          fab --version
+
+      - name: Authenticate fab CLI with SPN
+        env:
+          FAB_TENANT_ID:     ${{ secrets.TARGET_TENANT_ID }}
+          FAB_CLIENT_ID:     ${{ secrets.TARGET_CLIENT_ID }}
+          FAB_CLIENT_SECRET: ${{ secrets.TARGET_CLIENT_SECRET }}
+        run: |
+          echo "Logging in to Fabric CLI via Service Principal..."
+          fab auth login \
+            --service-principal \
+            --tenant "$FAB_TENANT_ID" \
+            --client-id "$FAB_CLIENT_ID" \
+            --client-secret "$FAB_CLIENT_SECRET"
+          echo "Auth OK."
+
+      - name: Resolve item folders from workspace-src
+        id: resolve
+        env:
+          ITEM_NAMES: ${{ github.event.inputs.item_names }}
+        run: |
+          python3 -c "
+          import os, sys
+          from pathlib import Path
+          import yaml
+
+          WORKSPACE_SRC = Path('workspace-src')
+          MANIFEST_FILE = Path('deploy_manifest.yml')
+          AUTO_CREATED  = {'SQLAnalyticsEndpoint'}
+          item_names_env = os.getenv('ITEM_NAMES', 'all').strip()
+
+          manifest = {}
+          if MANIFEST_FILE.exists():
+              with open(MANIFEST_FILE) as f:
+                  data = yaml.safe_load(f)
+              manifest = {item['name']: item for item in data.get('items', [])}
+
+          repo_items = {}
+          if WORKSPACE_SRC.exists():
+              for entry in sorted(WORKSPACE_SRC.iterdir()):
+                  if entry.is_dir() and not entry.name.startswith('.'):
+                      parts = entry.name.rsplit('.', 1)
+                      if len(parts) == 2:
+                          repo_items[parts[0]] = parts[1]
+
+          if item_names_env.lower() == 'all':
+              candidates = [n for n, e in manifest.items() if e.get('enabled', True)]
+          else:
+              candidates = [n.strip() for n in item_names_env.split(',') if n.strip()]
+
+          valid = []
+          for name in candidates:
+              if name not in repo_items:
+                  print(f'[WARN] {name} not found in workspace-src/', file=sys.stderr)
+                  continue
+              if repo_items[name] in AUTO_CREATED:
+                  continue
+              valid.append(name)
+
+          # Output: 'FolderName1 FolderName2' for use in shell loop
+          folders = ' '.join(f'{n}.{repo_items[n]}' for n in valid if n in repo_items)
+          print(f'Folders to deploy: {folders}')
+          gh_output = os.environ.get('GITHUB_OUTPUT', '')
+          if gh_output:
+              with open(gh_output, 'a') as f:
+                  f.write(f'folders={folders}\n')
+                  f.write(f'names={\" \".join(valid)}\n')
+          "
+
+      - name: Deploy items via fab CLI
+        env:
+          TARGET_WORKSPACE_ID: ${{ secrets.TARGET_WORKSPACE_ID }}
+          DEPLOY_FOLDERS:      ${{ steps.resolve.outputs.folders }}
+          ITEM_NAMES:          ${{ github.event.inputs.item_names }}
+          ENVIRONMENT:         ${{ github.event.inputs.environment }}
+        run: |
+          echo "=============================================="
+          echo "  fab CLI Deploy"
+          echo "  Environment   : $ENVIRONMENT"
+          echo "  Items         : $ITEM_NAMES"
+          echo "  Workspace     : $TARGET_WORKSPACE_ID"
+          echo "=============================================="
+
+          if [ -z "$DEPLOY_FOLDERS" ]; then
+            echo "No valid items found to deploy. Exiting."
+            exit 1
+          fi
+
+          for FOLDER in $DEPLOY_FOLDERS; do
+            ITEM_PATH="workspace-src/$FOLDER"
+            echo "----------------------------------------------"
+            echo "  Deploying: $FOLDER"
+            echo "  Path     : $ITEM_PATH"
+            echo "----------------------------------------------"
+
+            # fab deploy uploads a single item folder to the target workspace.
+            # --workspace  : target workspace GUID
+            # --source-dir : path to the item folder (e.g. workspace-src/devsecops_lakehouse.Lakehouse)
+            # --environment: maps to parameter.yml PROD/UAT/DEV find_replace values
+            fab item deploy \
+              --workspace "$TARGET_WORKSPACE_ID" \
+              --source-dir "$ITEM_PATH" \
+              --environment "$ENVIRONMENT" \
+              --verbose
+
+            echo "  ✅ $FOLDER deployed."
+          done
+
+          echo "=============================================="
+          echo "  ✅ All items deployed successfully."
+          echo "=============================================="
+
+      - name: Logout fab CLI
+        if: always()
+        run: fab auth logout || true

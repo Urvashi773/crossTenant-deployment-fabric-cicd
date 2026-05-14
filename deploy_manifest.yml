@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# deploy_manifest.yml — Master Deployment Manifest
+#
+# This is the SINGLE SOURCE OF TRUTH for all deployable Fabric items in this repo.
+#
+# HOW TO ADD A NEW ITEM:
+#   1. Ensure it is committed to workspace-src/ via Fabric Git sync
+#   2. Add an entry below (name, type, enabled, description)
+#   3. If it references workspace-specific IDs (Lakehouse ID, connection ID etc.),
+#      add a find_replace entry in parameter.yml scoped to this item
+#   4. Run the pipeline with ITEM_NAMES including this item's name
+#
+# ENABLED FLAG:
+#   enabled: true  → item will be included when ITEM_NAMES="all"
+#   enabled: false → item is known but skipped by default; must be named explicitly
+#                    Use this for items blocked by SKU, incomplete setup, or WIP
+#
+# ITEM TYPES SUPPORTED BY fabric-cicd:
+#   Lakehouse, DataAgent, Notebook, DataPipeline, Environment,
+#   SemanticModel, Report, Eventhouse, KQLDatabase, KQLDashboard,
+#   Warehouse, SparkJobDefinition, SQLDatabase
+#   (SQLAnalyticsEndpoint is auto-created with Lakehouse — never deploy manually)
+# ─────────────────────────────────────────────────────────────────────────────
+
+items:
+
+  # ── Lakehouse ──────────────────────────────────────────────────────────────
+  - name: devsecops_lakehouse
+    type: Lakehouse
+    enabled: true
+    description: "JDDO Finance Data Silver Lakehouse"
+    notes: |
+      Shell only — actual data (Parquet/Delta) must be migrated separately via AzCopy.
+      SQL Analytics Endpoint is auto-created by Fabric alongside this Lakehouse.
+    parameter_keys:
+      - PLACEHOLDER_SOURCE_LAKEHOUSE_ID     # remapped to target Lakehouse ID via parameter.yml
+
+  # ── Data Agent ────────────────────────────────────────────────────────────
+  - name: Hiawatha_DataAgent
+    type: DataAgent
+    enabled: false      # DISABLED: requires paid Fabric capacity (F SKU / P SKU)
+    description: "JDDO Hiawatha Data Agent — connects to devsecops_lakehouse"
+    requires_paid_sku: true
+    depends_on:
+      - devsecops_lakehouse   # Lakehouse must exist in target workspace first
+    notes: |
+      Set enabled: true and run pipeline once the workspace is on a paid Fabric capacity.
+      DataAgent definition contains the source Lakehouse ID — remapped by parameter.yml.
+    parameter_keys:
+      - PLACEHOLDER_SOURCE_LAKEHOUSE_ID     # remapped inside DataAgent definition JSON
+
+  # ── TEMPLATE — add new items here ─────────────────────────────────────────
+  # - name: <item-name-exactly-as-in-workspace-src>
+  #   type: <ItemType>
+  #   enabled: false
+  #   description: ""
+  #   depends_on: []
+  #   parameter_keys: []
+  #   notes: ""

@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# parameter.yml — fabric-cicd ID Remapping Configuration
+#
+# This file MUST live in the repository_directory (workspace-src/).
+# NOTE: deploy.py copies this file into the staging dir before running
+#       FabricWorkspace, so it is always available to fabric-cicd.
+#
+# STRUCTURE:
+#   find_replace entries remap source-environment IDs to target-environment IDs.
+#   Each entry can be scoped to a specific item_type and item_name so remapping
+#   is precise and does not accidentally affect unrelated files.
+#
+# HOW TO FILL IN:
+#   Step 1: SOURCE_LAKEHOUSE_ID
+#     Fabric portal → source workspace → devsecops_lakehouse → copy GUID from URL
+#     Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#
+#   Step 2: TARGET_LAKEHOUSE_ID
+#     Run the pipeline once (Lakehouse-only deploy).
+#     After Lakehouse is created in target workspace → copy GUID from URL.
+#     Fill in below → push → re-run pipeline.
+#     This ensures the DataAgent definition points to the correct target Lakehouse.
+#
+#   Step 3: SOURCE_WORKSPACE_ID
+#     Fabric portal → source workspace → Settings → copy GUID from URL
+#
+# DEPLOY_ITEM COVERAGE:
+#   ┌──────────────────────┬─────────────────────────────────────────────────┐
+#   │ devsecops_lakehouse  │ No IDs to remap (Lakehouse shell has no refs)   │
+#   │ Hiawatha_DataAgent   │ Remaps source Lakehouse ID → target Lakehouse ID│
+#   └──────────────────────┴─────────────────────────────────────────────────┘
+# ─────────────────────────────────────────────────────────────────────────────
+
+find_replace:
+
+  # ── Hiawatha_DataAgent: Lakehouse ID remapping ──────────────────────────────
+  # The DataAgent definition JSON contains the source Lakehouse GUID.
+  # fabric-cicd finds every occurrence of SOURCE_LAKEHOUSE_ID in the DataAgent
+  # definition files and replaces it with TARGET_LAKEHOUSE_ID.
+  # Scoped to DataAgent only (item_type + item_name) to avoid touching other files.
+  - find_value: "9544494b-3bc6-44b6-8d8f-f65851debfb9"
+    item_type: "DataAgent"
+    item_name: "Hiawatha_DataAgent"
+    replace_value:
+      PROD: "PLACEHOLDER_TARGET_LAKEHOUSE_ID"
+      # Add more environments as needed:
+      # UAT:  "uat-lakehouse-guid"
+      # DEV:  "dev-lakehouse-guid"
+
+  # ── Workspace ID remapping (if referenced in any item definition) ───────────
+  # Source workspace ID: 6689d48e-b957-4502-ae35-baf19dd65ff4
+  # If any item definition references the source workspace GUID directly,
+  # remap it to the target workspace ID.
+  # $workspace.$id is a fabric-cicd dynamic variable — auto-resolves at deploy time.
+  - find_value: "6689d48e-b957-4502-ae35-baf19dd65ff4"
+    replace_value:
+      PROD: "$workspace.$id"
+
+  # ── TEMPLATE: Add new items here as you scale ──────────────────────────────
+  # When you add a new item to deploy_manifest.yml that references a
+  # source-specific ID, add a find_replace entry here scoped to that item.
+  #
+  # Example for a new Notebook referencing a Lakehouse connection:
+  # - find_value: "PLACEHOLDER_SOURCE_NOTEBOOK_LAKEHOUSE_ID"
+  #   item_type: "Notebook"
+  #   item_name: "MyNotebook"
+  #   replace_value:
+  #     PROD: "<target-lakehouse-id>"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DYNAMIC VARIABLES REFERENCE (fabric-cicd built-ins):
+#   $workspace.$id                        → target workspace ID (auto-resolved)
+#   $items.Lakehouse.<name>.$id           → target Lakehouse item ID
+#   $items.Lakehouse.<name>.$sqlendpoint  → SQL Analytics Endpoint connection string
+# ─────────────────────────────────────────────────────────────────────────────
