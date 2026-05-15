@@ -4,12 +4,15 @@ Deploy Microsoft Fabric item **schemas** across tenants using GitHub Actions. No
 
 ## Two Pipelines
 
-| Workflow | File | Approach |
-|---|---|---|
-| 🚀 Python Library | `deploy-fabric-python.yml` | `fabric-cicd` Python library (same as ADO) |
-| 🚀 REST API | `deploy-fabric-cli.yml` | Direct Fabric REST API via `curl` + Azure AD SPN token |
+| Workflow | File | Deploys Lakehouse | Deploys DataAgent |
+|---|---|---|---|
+| 🚀 Python Library | `deploy-fabric-python.yml` | ✅ Yes | ✅ Yes |
+| 🚀 REST API | `deploy-fabric-cli.yml` | ✅ Yes | ❌ No |
+
+> **Rule of thumb:** If you need to deploy a **DataAgent**, always use the **Python Library pipeline**. The REST API pipeline is for simpler schema items only.
 
 Both are triggered manually via **Actions → Run workflow**.
+
 
 ---
 
