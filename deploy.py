@@ -233,10 +233,29 @@ try:
     )
 
     # ──────────────────────────────────────────────────────
-    # Deploy
+    # Deploy — with retry for Fabric async deprovisioning delay
+    # When a Lakehouse is recently deleted, Fabric holds the name
+    # for a few minutes. Retry up to 4 times (3 min total).
     # ──────────────────────────────────────────────────────
+    import time
+    MAX_RETRIES  = 4
+    RETRY_DELAY  = 60   # seconds between retries
+
     print("\n[INFO] Publishing selected items...")
-    publish_all_items(target_workspace)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            publish_all_items(target_workspace)
+            break   # success — exit retry loop
+        except Exception as e:
+            err_msg = str(e)
+            if "not available yet" in err_msg and attempt < MAX_RETRIES:
+                print(f"\n[WARN] Fabric item not ready yet (attempt {attempt}/{MAX_RETRIES}).")
+                print(f"[WARN] Fabric is still deprovisioning the previously deleted item.")
+                print(f"[INFO] Waiting {RETRY_DELAY}s before retry...")
+                time.sleep(RETRY_DELAY)
+                print(f"[INFO] Retrying publish (attempt {attempt + 1}/{MAX_RETRIES})...")
+            else:
+                raise   # re-raise if not a timing error or out of retries
 
     # NOTE: unpublish_all_orphan_items is intentionally NOT called here.
     # Running name-level selection means the staging dir only has a subset
@@ -250,3 +269,4 @@ finally:
     if staging_dir and staging_dir.exists():
         shutil.rmtree(staging_dir, ignore_errors=True)
         print(f"[INFO] Cleaned up staging dir: {staging_dir}")
+
