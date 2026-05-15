@@ -219,6 +219,17 @@ jobs:
               return parts
 
           import urllib.request
+          import urllib.error
+
+          # Items that have their own dedicated API endpoint (no generic /items create)
+          # and do NOT support updateDefinition
+          SIMPLE_ITEMS = {
+              "Lakehouse": {
+                  "create_url": f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/lakehouses",
+                  "create_body_keys": ["displayName", "description"],
+                  "supports_definition": False,
+              }
+          }
 
           def fabric_request(method: str, url: str, body=None):
               data = json.dumps(body).encode() if body else None
@@ -231,10 +242,12 @@ jobs:
               )
               try:
                   with urllib.request.urlopen(req) as resp:
-                      return resp.status, json.loads(resp.read()) if resp.read() else {}
+                      raw = resp.read()          # read ONCE
+                      parsed = json.loads(raw) if raw else {}
+                      return resp.status, parsed
               except urllib.error.HTTPError as e:
-                  body_text = e.read().decode()
-                  return e.code, body_text
+                  err_body = e.read().decode("utf-8", errors="replace")
+                  return e.code, err_body
 
           # ── Deploy each item ───────────────────────────────────────────────
           deployed = []
@@ -245,38 +258,60 @@ jobs:
               print(f"\n{'─'*55}")
               print(f"  Deploying: {name} [{item_type}]")
 
-              definition_parts = read_item_definition(folder, item_type, name)
-              print(f"  Definition files: {[p['path'] for p in definition_parts]}")
+              spec = SIMPLE_ITEMS.get(item_type)
 
               if name in target_by_name:
-                  # ── UPDATE existing item definition ────────────────────────
                   item_id = target_by_name[name]["id"]
-                  print(f"  Exists in target (id={item_id}) — updating definition...")
-                  status, resp = fabric_request(
-                      "POST",
-                      f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items/{item_id}/updateDefinition",
-                      {"definition": {"parts": definition_parts}}
-                  )
-                  if status in (200, 202):
-                      print(f"  ✅ Updated successfully (HTTP {status})")
+                  print(f"  Already exists in target (id={item_id})")
+
+                  if spec and not spec["supports_definition"]:
+                      # Simple items like Lakehouse: already exists = already up-to-date
+                      # Schema is just a shell — nothing to update via REST
+                      print(f"  ✅ {item_type} shell already exists. Schema is up-to-date.")
                       deployed.append(name)
                   else:
-                      print(f"  ❌ Update failed (HTTP {status}): {resp}")
-                      failed.append(name)
+                      # Push updated definition for supported item types
+                      definition_parts = read_item_definition(folder, item_type, name)
+                      print(f"  Updating definition ({len(definition_parts)} files)...")
+                      status, resp = fabric_request(
+                          "POST",
+                          f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items/{item_id}/updateDefinition",
+                          {"definition": {"parts": definition_parts}}
+                      )
+                      if status in (200, 202):
+                          print(f"  ✅ Updated successfully (HTTP {status})")
+                          deployed.append(name)
+                      else:
+                          print(f"  ❌ Update failed (HTTP {status}): {resp}")
+                          failed.append(name)
               else:
-                  # ── CREATE new item ────────────────────────────────────────
                   print(f"  Not found in target — creating new {item_type}...")
-                  status, resp = fabric_request(
-                      "POST",
-                      f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items",
-                      {
-                          "displayName": name,
-                          "type": item_type,
-                          "definition": {"parts": definition_parts}
-                      }
-                  )
+
+                  if spec:
+                      # Use type-specific endpoint (e.g. /lakehouses)
+                      create_body = {"displayName": name}
+                      status, resp = fabric_request(
+                          "POST",
+                          spec["create_url"],
+                          create_body
+                      )
+                  else:
+                      # Generic items endpoint with definition payload
+                      definition_parts = read_item_definition(folder, item_type, name)
+                      print(f"  Definition files: {[p['path'] for p in definition_parts]}")
+                      status, resp = fabric_request(
+                          "POST",
+                          f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items",
+                          {
+                              "displayName": name,
+                              "type": item_type,
+                              "definition": {"parts": definition_parts}
+                          }
+                      )
+
                   if status in (200, 201, 202):
-                      print(f"  ✅ Created successfully (HTTP {status})")
+                      item_id = resp.get("id", "?") if isinstance(resp, dict) else "?"
+                      print(f"  ✅ Created successfully (HTTP {status}, id={item_id})")
                       deployed.append(name)
                   else:
                       print(f"  ❌ Create failed (HTTP {status}): {resp}")
