@@ -7,7 +7,7 @@ Deploy Microsoft Fabric item **schemas** across tenants using GitHub Actions. No
 | Workflow | File | Approach |
 |---|---|---|
 | 🚀 Python Library | `deploy-fabric-python.yml` | `fabric-cicd` Python library (same as ADO) |
-| 🚀 fab CLI | `deploy-fabric-cli.yml` | Official Microsoft `fab` CLI |
+| 🚀 REST API | `deploy-fabric-cli.yml` | Direct Fabric REST API via `curl` + Azure AD SPN token |
 
 Both are triggered manually via **Actions → Run workflow**.
 

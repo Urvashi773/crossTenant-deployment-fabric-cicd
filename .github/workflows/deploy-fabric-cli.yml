@@ -1,23 +1,32 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # deploy-fabric-cli.yml
-# GitHub Actions — Fabric CI/CD (fab CLI Approach)
+# GitHub Actions — Fabric CI/CD (Fabric REST API Approach)
 #
-# Approach: Uses the official Microsoft Fabric CLI (`fab`) to deploy item
-#           schemas cross-tenant via SPN auth. The `fab` CLI internally
-#           calls the Fabric REST APIs.
+# Approach: Calls Microsoft Fabric REST APIs directly using curl + Azure AD SPN
+#           token. No third-party libraries — pure REST API calls.
 #
-# No data backup/restore — schema/metadata only.
+#           This is the "CLI / direct API" approach as opposed to the
+#           fabric-cicd Python library used in deploy-fabric-python.yml.
+#
+# Flow:
+#   1. Get OAuth2 token from Azure AD (SPN)
+#   2. Discover target workspace items via GET /v1/workspaces/{id}/items
+#   3. For each selected item in workspace-src/:
+#        - Read local item definition files
+#        - Compare with target workspace item (by displayName)
+#        - PATCH existing item definition  or  POST to create new item
 #
 # Required GitHub Secrets (Settings → Secrets → Actions):
 #   TARGET_TENANT_ID       — Azure AD tenant of the target Fabric workspace
-#   TARGET_CLIENT_ID       — SPN client ID with Workspace Admin on target
+#   TARGET_CLIENT_ID       — SPN App (client) ID — must be Workspace Admin
 #   TARGET_CLIENT_SECRET   — SPN client secret
 #   TARGET_WORKSPACE_ID    — GUID of the target Fabric workspace
 #
-# fab CLI docs: https://aka.ms/fabric-cli
+# Fabric REST API docs:
+#   https://learn.microsoft.com/en-us/rest/api/fabric/core/items
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: "🚀 Deploy Fabric Schema (fab CLI)"
+name: "🚀 Deploy Fabric Schema (REST API)"
 
 on:
   workflow_dispatch:
@@ -38,7 +47,7 @@ on:
 
 jobs:
   deploy:
-    name: "🚀 fab deploy: ${{ github.event.inputs.item_names }}"
+    name: "🚀 REST API deploy: ${{ github.event.inputs.item_names }}"
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
 
@@ -51,122 +60,234 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install fab CLI
-        run: |
-          echo "Installing Microsoft Fabric CLI..."
-          pip install fabric-cli
-          fab --version
+      - name: Install dependencies
+        run: pip install pyyaml azure-identity
 
-      - name: Authenticate fab CLI with SPN
+      - name: Get Azure AD OAuth token (SPN)
+        id: token
         env:
-          FAB_TENANT_ID:     ${{ secrets.TARGET_TENANT_ID }}
-          FAB_CLIENT_ID:     ${{ secrets.TARGET_CLIENT_ID }}
-          FAB_CLIENT_SECRET: ${{ secrets.TARGET_CLIENT_SECRET }}
+          TARGET_TENANT_ID:     ${{ secrets.TARGET_TENANT_ID }}
+          TARGET_CLIENT_ID:     ${{ secrets.TARGET_CLIENT_ID }}
+          TARGET_CLIENT_SECRET: ${{ secrets.TARGET_CLIENT_SECRET }}
         run: |
-          echo "Logging in to Fabric CLI via Service Principal..."
-          fab auth login \
-            --service-principal \
-            --tenant "$FAB_TENANT_ID" \
-            --client-id "$FAB_CLIENT_ID" \
-            --client-secret "$FAB_CLIENT_SECRET"
-          echo "Auth OK."
+          echo "Fetching OAuth2 token from Azure AD..."
+          RESPONSE=$(curl -sf -X POST \
+            "https://login.microsoftonline.com/${TARGET_TENANT_ID}/oauth2/v2.0/token" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${TARGET_CLIENT_ID}" \
+            -d "client_secret=${TARGET_CLIENT_SECRET}" \
+            -d "scope=https://api.fabric.microsoft.com/.default")
 
-      - name: Resolve item folders from workspace-src
-        id: resolve
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+          if [ -z "$TOKEN" ]; then
+            echo "##[error]Failed to obtain access token."
+            exit 1
+          fi
+
+          echo "Token obtained successfully."
+          # Mask token in logs
+          echo "::add-mask::$TOKEN"
+          echo "fabric_token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Discover workspace items (Fabric API)
+        id: discover
         env:
-          ITEM_NAMES: ${{ github.event.inputs.item_names }}
+          TARGET_WORKSPACE_ID: ${{ secrets.TARGET_WORKSPACE_ID }}
+          FABRIC_TOKEN:        ${{ steps.token.outputs.fabric_token }}
         run: |
-          python3 -c "
-          import os, sys
+          echo "=============================================="
+          echo "  Fabric REST API — Item Discovery"
+          echo "  Workspace: $TARGET_WORKSPACE_ID"
+          echo "=============================================="
+
+          # List all items in the target workspace
+          ITEMS_JSON=$(curl -sf \
+            "https://api.fabric.microsoft.com/v1/workspaces/${TARGET_WORKSPACE_ID}/items" \
+            -H "Authorization: Bearer ${FABRIC_TOKEN}" \
+            -H "Content-Type: application/json")
+
+          echo "Items in target workspace:"
+          echo "$ITEMS_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          items = data.get('value', [])
+          for item in items:
+              print(f\"  [{item['type']}] {item['displayName']} → {item['id']}\")
+          print(f'Total: {len(items)} items')
+          "
+
+          # Save to file for use in next step
+          echo "$ITEMS_JSON" > /tmp/target_items.json
+          echo "items_json_path=/tmp/target_items.json" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy items via Fabric REST API
+        env:
+          TARGET_WORKSPACE_ID: ${{ secrets.TARGET_WORKSPACE_ID }}
+          FABRIC_TOKEN:        ${{ steps.token.outputs.fabric_token }}
+          ITEM_NAMES:          ${{ github.event.inputs.item_names }}
+          ENVIRONMENT:         ${{ github.event.inputs.environment }}
+        run: |
+          python3 << 'PYEOF'
+          import os, sys, json, base64, subprocess
           from pathlib import Path
           import yaml
 
-          WORKSPACE_SRC = Path('workspace-src')
-          MANIFEST_FILE = Path('deploy_manifest.yml')
-          AUTO_CREATED  = {'SQLAnalyticsEndpoint'}
-          item_names_env = os.getenv('ITEM_NAMES', 'all').strip()
+          WORKSPACE_SRC    = Path("workspace-src")
+          MANIFEST_FILE    = Path("deploy_manifest.yml")
+          WORKSPACE_ID     = os.environ["TARGET_WORKSPACE_ID"]
+          TOKEN            = os.environ["FABRIC_TOKEN"]
+          ITEM_NAMES_ENV   = os.environ.get("ITEM_NAMES", "all").strip()
+          ENVIRONMENT      = os.environ.get("ENVIRONMENT", "PROD")
+          PARAMETER_FILE   = Path("parameter.yml")
+          AUTO_CREATED     = {"SQLAnalyticsEndpoint"}
+          FABRIC_API       = "https://api.fabric.microsoft.com/v1"
 
+          # ── Load manifest ─────────────────────────────────────────────────
           manifest = {}
           if MANIFEST_FILE.exists():
               with open(MANIFEST_FILE) as f:
                   data = yaml.safe_load(f)
-              manifest = {item['name']: item for item in data.get('items', [])}
+              manifest = {i["name"]: i for i in data.get("items", [])}
 
-          repo_items = {}
-          if WORKSPACE_SRC.exists():
-              for entry in sorted(WORKSPACE_SRC.iterdir()):
-                  if entry.is_dir() and not entry.name.startswith('.'):
-                      parts = entry.name.rsplit('.', 1)
-                      if len(parts) == 2:
-                          repo_items[parts[0]] = parts[1]
+          # ── Discover repo items ────────────────────────────────────────────
+          repo_items = {}   # name → (type, folder_path)
+          for entry in sorted(WORKSPACE_SRC.iterdir()):
+              if entry.is_dir() and not entry.name.startswith("."):
+                  parts = entry.name.rsplit(".", 1)
+                  if len(parts) == 2:
+                      repo_items[parts[0]] = (parts[1], entry)
 
-          if item_names_env.lower() == 'all':
-              candidates = [n for n, e in manifest.items() if e.get('enabled', True)]
+          # ── Resolve requested items ────────────────────────────────────────
+          if ITEM_NAMES_ENV.lower() == "all":
+              candidates = [n for n, e in manifest.items() if e.get("enabled", True)]
           else:
-              candidates = [n.strip() for n in item_names_env.split(',') if n.strip()]
+              candidates = [n.strip() for n in ITEM_NAMES_ENV.split(",") if n.strip()]
 
-          valid = []
+          selected = []
           for name in candidates:
               if name not in repo_items:
-                  print(f'[WARN] {name} not found in workspace-src/', file=sys.stderr)
+                  print(f"[WARN] {name} not found in workspace-src/ — skipping")
                   continue
-              if repo_items[name] in AUTO_CREATED:
+              if repo_items[name][0] in AUTO_CREATED:
+                  print(f"[SKIP] {name} is auto-created by Fabric")
                   continue
-              valid.append(name)
+              selected.append(name)
 
-          # Output: 'FolderName1 FolderName2' for use in shell loop
-          folders = ' '.join(f'{n}.{repo_items[n]}' for n in valid if n in repo_items)
-          print(f'Folders to deploy: {folders}')
-          gh_output = os.environ.get('GITHUB_OUTPUT', '')
-          if gh_output:
-              with open(gh_output, 'a') as f:
-                  f.write(f'folders={folders}\n')
-                  f.write(f'names={\" \".join(valid)}\n')
-          "
+          print(f"Items selected for deploy: {selected}")
 
-      - name: Deploy items via fab CLI
-        env:
-          TARGET_WORKSPACE_ID: ${{ secrets.TARGET_WORKSPACE_ID }}
-          DEPLOY_FOLDERS:      ${{ steps.resolve.outputs.folders }}
-          ITEM_NAMES:          ${{ github.event.inputs.item_names }}
-          ENVIRONMENT:         ${{ github.event.inputs.environment }}
-        run: |
-          echo "=============================================="
-          echo "  fab CLI Deploy"
-          echo "  Environment   : $ENVIRONMENT"
-          echo "  Items         : $ITEM_NAMES"
-          echo "  Workspace     : $TARGET_WORKSPACE_ID"
-          echo "=============================================="
+          # ── Load existing items in target workspace ────────────────────────
+          with open("/tmp/target_items.json") as f:
+              target_data = json.load(f)
+          target_by_name = {i["displayName"]: i for i in target_data.get("value", [])}
 
-          if [ -z "$DEPLOY_FOLDERS" ]; then
-            echo "No valid items found to deploy. Exiting."
-            exit 1
-          fi
+          # ── Load parameter.yml for ID remapping ───────────────────────────
+          param_rules = []
+          if PARAMETER_FILE.exists():
+              with open(PARAMETER_FILE) as f:
+                  param_data = yaml.safe_load(f)
+              param_rules = param_data.get("find_replace", [])
 
-          for FOLDER in $DEPLOY_FOLDERS; do
-            ITEM_PATH="workspace-src/$FOLDER"
-            echo "----------------------------------------------"
-            echo "  Deploying: $FOLDER"
-            echo "  Path     : $ITEM_PATH"
-            echo "----------------------------------------------"
+          def apply_remapping(content: str, item_type: str, item_name: str) -> str:
+              for rule in param_rules:
+                  # Skip rules scoped to a different item
+                  if rule.get("item_type") and rule["item_type"] != item_type:
+                      continue
+                  if rule.get("item_name") and rule["item_name"] != item_name:
+                      continue
+                  find_val = rule.get("find_value", "")
+                  replace_map = rule.get("replace_value", {})
+                  replace_val = replace_map.get(ENVIRONMENT, "")
+                  if find_val and replace_val:
+                      content = content.replace(find_val, replace_val)
+              return content
 
-            # fab deploy uploads a single item folder to the target workspace.
-            # --workspace  : target workspace GUID
-            # --source-dir : path to the item folder (e.g. workspace-src/devsecops_lakehouse.Lakehouse)
-            # --environment: maps to parameter.yml PROD/UAT/DEV find_replace values
-            fab item deploy \
-              --workspace "$TARGET_WORKSPACE_ID" \
-              --source-dir "$ITEM_PATH" \
-              --environment "$ENVIRONMENT" \
-              --verbose
+          def read_item_definition(folder: Path, item_type: str, item_name: str) -> list[dict]:
+              """Read all definition files from folder and return as Fabric API parts list."""
+              parts = []
+              for file in sorted(folder.rglob("*")):
+                  if file.is_file() and not file.name.startswith(".") and file.name != ".platform":
+                      rel_path = file.relative_to(folder)
+                      content = file.read_text(encoding="utf-8", errors="replace")
+                      content = apply_remapping(content, item_type, item_name)
+                      encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+                      parts.append({
+                          "path": str(rel_path).replace("\\", "/"),
+                          "payload": encoded,
+                          "payloadType": "InlineBase64"
+                      })
+              return parts
 
-            echo "  ✅ $FOLDER deployed."
-          done
+          import urllib.request
 
-          echo "=============================================="
-          echo "  ✅ All items deployed successfully."
-          echo "=============================================="
+          def fabric_request(method: str, url: str, body=None):
+              data = json.dumps(body).encode() if body else None
+              req = urllib.request.Request(
+                  url, data=data, method=method,
+                  headers={
+                      "Authorization": f"Bearer {TOKEN}",
+                      "Content-Type": "application/json"
+                  }
+              )
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return resp.status, json.loads(resp.read()) if resp.read() else {}
+              except urllib.error.HTTPError as e:
+                  body_text = e.read().decode()
+                  return e.code, body_text
 
-      - name: Logout fab CLI
-        if: always()
-        run: fab auth logout || true
+          # ── Deploy each item ───────────────────────────────────────────────
+          deployed = []
+          failed   = []
+
+          for name in selected:
+              item_type, folder = repo_items[name]
+              print(f"\n{'─'*55}")
+              print(f"  Deploying: {name} [{item_type}]")
+
+              definition_parts = read_item_definition(folder, item_type, name)
+              print(f"  Definition files: {[p['path'] for p in definition_parts]}")
+
+              if name in target_by_name:
+                  # ── UPDATE existing item definition ────────────────────────
+                  item_id = target_by_name[name]["id"]
+                  print(f"  Exists in target (id={item_id}) — updating definition...")
+                  status, resp = fabric_request(
+                      "POST",
+                      f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items/{item_id}/updateDefinition",
+                      {"definition": {"parts": definition_parts}}
+                  )
+                  if status in (200, 202):
+                      print(f"  ✅ Updated successfully (HTTP {status})")
+                      deployed.append(name)
+                  else:
+                      print(f"  ❌ Update failed (HTTP {status}): {resp}")
+                      failed.append(name)
+              else:
+                  # ── CREATE new item ────────────────────────────────────────
+                  print(f"  Not found in target — creating new {item_type}...")
+                  status, resp = fabric_request(
+                      "POST",
+                      f"{FABRIC_API}/workspaces/{WORKSPACE_ID}/items",
+                      {
+                          "displayName": name,
+                          "type": item_type,
+                          "definition": {"parts": definition_parts}
+                      }
+                  )
+                  if status in (200, 201, 202):
+                      print(f"  ✅ Created successfully (HTTP {status})")
+                      deployed.append(name)
+                  else:
+                      print(f"  ❌ Create failed (HTTP {status}): {resp}")
+                      failed.append(name)
+
+          print(f"\n{'='*55}")
+          print(f"  ✅ Deployed : {deployed}")
+          if failed:
+              print(f"  ❌ Failed   : {failed}")
+          print(f"{'='*55}")
+
+          if failed:
+              sys.exit(1)
+          PYEOF
