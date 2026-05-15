@@ -36,10 +36,10 @@ items:
       - PLACEHOLDER_SOURCE_LAKEHOUSE_ID     # remapped to target Lakehouse ID via parameter.yml
 
   # ── Data Agent ────────────────────────────────────────────────────────────
-  - name: Hiawatha_DataAgent
+  - name: DataAgent
     type: DataAgent
     enabled: false      # DISABLED: requires paid Fabric capacity (F SKU / P SKU)
-    description: "JDDO Hiawatha Data Agent — connects to devsecops_lakehouse"
+    description: "DataAgent — connects to devsecops_lakehouse"
     requires_paid_sku: true
     depends_on:
       - devsecops_lakehouse   # Lakehouse must exist in target workspace first

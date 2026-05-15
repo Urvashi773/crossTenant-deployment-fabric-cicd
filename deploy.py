@@ -1,13 +1,13 @@
 """
 fabric-cicd Deployment Script — Name-Level Item Filtering
-POC: devsecops_lakehouse (Lakehouse) + Hiawatha_DataAgent (DataAgent)
+POC: devsecops_lakehouse (Lakehouse) + DataAgent (DataAgent)
 SPN Auth via ClientSecretCredential (yash-spn-DevOps-FabricAIUsecase)
 
 HOW ITEM SELECTION WORKS:
   1. ITEM_NAMES env var controls which items deploy (by name, not just type).
      - "all"   → deploy all enabled items in deploy_manifest.yml
      - "devsecops_lakehouse"                    → Lakehouse only
-     - "devsecops_lakehouse,Hiawatha_DataAgent" → both
+     - "devsecops_lakehouse,DataAgent" → both
   2. Selected item folders are copied into a temp staging directory.
      FabricWorkspace runs against the staging dir — so fabric-cicd only
      sees the items you selected (not the full workspace-src/).

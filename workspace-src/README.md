@@ -21,7 +21,7 @@ workspace-src/
     .platform
   devsecops_lakehouse.SQLAnalyticsEndpoint/
     .platform   (auto-created, no action needed)
-  Hiawatha_DataAgent.DataAgent/
+  DataAgent.DataAgent/
     .platform
     DataAgentDefinition.json   ← contains Lakehouse ID reference to remap
 ```
@@ -30,7 +30,7 @@ workspace-src/
 
 Before connecting to Git:
 1. In source workspace → New item → **Data Agent**
-2. Name it (e.g., `Hiawatha_DataAgent`)
+2. Name it (e.g., `DataAgent`)
 3. Connect it to `devsecops_lakehouse`
 4. Save → Git sync will pick it up
 

@@ -68,7 +68,7 @@ The **Python Library pipeline** (`deploy-fabric-python.yml`) supports deploying 
 
 ### Step 1 — Enable in `deploy_manifest.yml`
 ```yaml
-- name: Hiawatha_DataAgent
+- name: DataAgent
   type: DataAgent
   enabled: true        # ← Change from false to true
 ```
@@ -79,18 +79,18 @@ The DataAgent definition JSON contains the **source Lakehouse GUID** which must 
 find_replace:
   - find_value: "9544494b-3bc6-44b6-8d8f-f65851debfb9"    # source LH ID
     item_type: "DataAgent"
-    item_name: "Hiawatha_DataAgent"
+    item_name: "DataAgent"
     replace_value:
       PROD: "92b1222a-0427-4440-b59c-8d0856dde928"         # ← your target LH ID
 ```
 > Find your target Lakehouse GUID: Fabric portal → Target workspace → `devsecops_lakehouse` → copy GUID from the URL.
 
-### Step 3 — Sync `Hiawatha_DataAgent` to workspace-src/
+### Step 3 — Sync `DataAgent` to workspace-src/
 The DataAgent definition must exist in `workspace-src/`. Connect the source workspace to this Git repository via **Fabric → workspace → Git integration → Sync**.
 
 ### Step 4 — Run with both items
 ```
-Items to deploy: devsecops_lakehouse,Hiawatha_DataAgent
+Items to deploy: devsecops_lakehouse,DataAgent
 ```
 `fabric-cicd` respects the `depends_on` in the manifest — it deploys the Lakehouse first, then the DataAgent automatically.
 

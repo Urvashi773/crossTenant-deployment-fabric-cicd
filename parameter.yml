@@ -27,20 +27,20 @@
 # DEPLOY_ITEM COVERAGE:
 #   ┌──────────────────────┬─────────────────────────────────────────────────┐
 #   │ devsecops_lakehouse  │ No IDs to remap (Lakehouse shell has no refs)   │
-#   │ Hiawatha_DataAgent   │ Remaps source Lakehouse ID → target Lakehouse ID│
+#   │ DataAgent   │ Remaps source Lakehouse ID → target Lakehouse ID│
 #   └──────────────────────┴─────────────────────────────────────────────────┘
 # ─────────────────────────────────────────────────────────────────────────────
 
 find_replace:
 
-  # ── Hiawatha_DataAgent: Lakehouse ID remapping ──────────────────────────────
+  # ── DataAgent: Lakehouse ID remapping ──────────────────────────────
   # The DataAgent definition JSON contains the source Lakehouse GUID.
   # fabric-cicd finds every occurrence of SOURCE_LAKEHOUSE_ID in the DataAgent
   # definition files and replaces it with TARGET_LAKEHOUSE_ID.
   # Scoped to DataAgent only (item_type + item_name) to avoid touching other files.
   - find_value: "9544494b-3bc6-44b6-8d8f-f65851debfb9"
     item_type: "DataAgent"
-    item_name: "Hiawatha_DataAgent"
+    item_name: "DataAgent"
     replace_value:
       PROD: "PLACEHOLDER_TARGET_LAKEHOUSE_ID"
       # Add more environments as needed:
